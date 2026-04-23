@@ -1,0 +1,36 @@
+# 의존성 및 환경 변수 (절대 금지)
+node_modules/
+.env
+.env.*
+.dev.vars
+.wrangler/
+
+# 로그 및 OS 파일
+*.log
+.DS_Store
+Thumbs.db
+
+# 빌드 및 임시 파일
+dist/
+.output/
+.api/
+api/
+
+# 모든 문서 파일 제외 (수집기 코드만 남김)
+*.md
+LICENSE
+docs/
+scripts/
+tests/
+GUIDE.md
+
+# 모든 SQL 및 DB 관련 파일 제외
+*.sql
+*.sqlite
+*.db
+schema.sql
+
+# 깃 설정 및 기타 제외
+.git/
+wrangler.toml
+package-lock.json

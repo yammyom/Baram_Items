@@ -1,0 +1,29 @@
+name: Baram Item Search Pipeline
+
+on:
+  schedule:
+    - cron: '0 15 * * *' # 매일 한국 시간 자정 (UTC 15:00)
+  workflow_dispatch: # 수동 실행 가능
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run Pipeline
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          NEXON_API_KEY: ${{ secrets.NEXON_API_KEY }}
+        run: node pipeline/index.js

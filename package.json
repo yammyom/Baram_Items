@@ -1,0 +1,14 @@
+{
+  "name": "baram-item-search-pipeline",
+  "version": "1.0.0",
+  "description": "Data pipeline for Baram item search",
+  "main": "pipeline/crawler.js",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.39.0",
+    "cheerio": "^1.0.0-rc.12",
+    "p-limit": "^4.0.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4.84.1"
+  }
+}
