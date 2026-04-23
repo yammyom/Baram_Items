@@ -1,134 +1,200 @@
+require('dotenv').config();
 const axios = require('axios');
 const cheerio = require('cheerio');
 const pLimit = require('p-limit');
 const { createClient } = require('@supabase/supabase-js');
-require('dotenv').config();
 
-/**
- * 통합 데이터 파이프라인 (GitHub Actions용)
- * 1. 랭킹 페이지 스크래핑 (6차 승급 이상)
- * 2. 넥슨 API 호출 (Rate Limit 준수)
- * 3. Supabase Upsert
- */
-
-const NEXON_API_KEY = process.env.NEXON_API_KEY;
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
-const limit = pLimit(250); // 안전을 위해 초당 250회로 제한
+const NEXON_API_KEY = process.env.NEXON_API_KEY;
 
-const SERVERS = { '연': 1, '무휼': 2, '유리': 3, '하자': 4, '호동': 5, '진': 6 };
-const SERVER_CODES = { '연': 131073, '무휼': 131074, '유리': 131086, '하자': 131087, '호동': 131088, '진': 131089 };
+const NEXON_SERVERS = { '연': 131073, '무휼': 131074, '유리': 131086, '하자': 131087, '호동': 131088, '진': 131089 };
+const DB_SERVER_IDS = { '연': 1, '무휼': 2, '유리': 3, '하자': 4, '호동': 5, '진': 6 };
 const JOBS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
 
-async function runPipeline() {
-  console.log('>>> 파이프라인 시작:', new Date().toISOString());
+// 목표 승급 단계 (8차 이상)
+const TARGET_PROMOTION_LEVEL = 6;
 
-  for (const [serverName, serverId] of Object.entries(SERVERS)) {
-    for (const jobCode of JOBS) {
-      console.log(`[*] 수집 중: ${serverName} (직업 코드: ${jobCode})`);
-      const characters = await scrapeRanking(serverName, jobCode);
-      
-      const tasks = characters.map(char => limit(() => processCharacter(char, serverName, serverId)));
-      await Promise.all(tasks);
-    }
-  }
+const PART_MAP = {
+  '무기': 1, '투구': 2, '갑옷': 3, '왼손': 4, '오른손': 4,
+  '목장식': 5, '목/어깨장식': 5, '신발': 6, '망토': 7, '얼굴장식': 8,
+  '보조1': 9, '보조2': 9, '보조': 9, '장신구': 10, '세트옷': 11, '방패/보조무기': 12,
+  '캐시 무기': 13, '캐시 투구': 14, '캐시 겉옷': 15,
+  '캐시 목장식': 16, '캐시 목/어깨장식': 16, '캐시 신발': 17,
+  '캐시 망토': 18, '캐시 얼굴장식': 19, '캐시 장신구': 20, '캐시 세트옷': 21,
+  '캐시 방패/보조무기': 22
+};
 
-  console.log('>>> 파이프라인 완료:', new Date().toISOString());
-}
+const itemCache = new Map();
+const limit = pLimit(30);
+const webLimit = pLimit(10); // 안정성을 위해 10으로 하향
 
-async function scrapeRanking(serverName, jobCode) {
-  const users = [];
-  const serverCode = SERVER_CODES[serverName];
-  let page = 0;
-
-  while (page < 50) { // 상위 1000명 위주
-    const startRank = (page * 20) + 1;
-    const url = `https://baram.nexon.com/Rank/List?maskGameCode=${serverCode}&n4Rank_start=${startRank}&codeGameJob=${jobCode}`;
-    
+// 재시도 로직을 포함한 axios 래퍼
+async function fetchWithRetry(url, params = {}, retries = 3) {
+  for (let i = 0; i < retries; i++) {
     try {
-      const resp = await axios.get(url, { timeout: 10000 });
-      const $ = cheerio.load(resp.data);
-      const rows = $('.border_rank_list table tbody tr:not(.no_data)');
-
-      if (rows.length === 0) break;
-
-      let hasSixPromotion = false;
-      rows.each((_, el) => {
-        const name = $(el).find('td').eq(2).text().trim();
-        const promoText = $(el).find('td').eq(5).text().trim();
-        const promo = parseInt(promoText) || 0;
-
-        if (promo >= 6) {
-          users.push({ name, promo });
-          hasSixPromotion = true;
-        }
-      });
-
-      if (!hasSixPromotion) break; // 6차 미만 영역 진입 시 중단
-      page++;
+      return await axios.get(url, { params, timeout: 8000 });
     } catch (err) {
-      console.error(`Scrape Error (${serverName}):`, err.message);
-      break;
+      if (i === retries - 1) throw err;
+      await new Promise(r => setTimeout(r, 1000 * (i + 1))); // 지수 백오프
     }
   }
-  return users;
 }
 
-async function processCharacter(char, serverName, serverId) {
-  try {
-    // 1. OCID 조회
-    const idResp = await axios.get(`https://open.api.nexon.com/baram/v1/id?character_name=${encodeURIComponent(char.name)}&server_name=${encodeURIComponent(serverName)}`, {
-      headers: { 'x-nxopen-api-key': NEXON_API_KEY }
-    });
-    const { ocid } = idResp.data;
+async function initItemCache() {
+  console.log('[*] 아이템 캐시 로드 중...');
+  const { data, error } = await supabase.from('items').select('item_id, name, part_id');
+  if (error) return console.error('❌ 캐시 로드 실패:', error.message);
+  data.forEach(item => itemCache.set(`${item.name}|${item.part_id}`, item.item_id));
+  console.log(`[*] ${itemCache.size}개의 아이템 캐시 로드 완료`);
+}
 
-    // 2. 기본 정보 (레벨)
-    const basicResp = await axios.get(`https://open.api.nexon.com/baram/v1/character/basic?ocid=${ocid}`, {
-      headers: { 'x-nxopen-api-key': NEXON_API_KEY }
-    });
-    const level = basicResp.data.character_level;
+async function getOrCreateItemIds(items) {
+  const ids = [];
+  const uniqueItemsInChar = new Map();
+  for (const item of items) {
+    const key = `${item.name}|${item.part_id}`;
+    if (itemCache.has(key)) ids.push(itemCache.get(key));
+    else uniqueItemsInChar.set(key, item);
+  }
 
-    // 3. 장비 정보
-    const equipResp = await axios.get(`https://open.api.nexon.com/baram/v1/character/item-equipment?ocid=${ocid}`, {
-      headers: { 'x-nxopen-api-key': NEXON_API_KEY }
-    });
-    
-    const equipment = equipResp.data.item_equipment || [];
-    const itemIds = [];
-
-    for (const item of equipment) {
-      if (!item.item_name) continue;
-      const itemId = generateItemId(item.item_name, item.item_equipment_slot_name);
-      
-      await supabase.from('items').upsert({
-        item_id: itemId,
-        name: item.item_name,
-        part: item.item_equipment_slot_name
-      });
-      itemIds.push(itemId);
+  if (uniqueItemsInChar.size > 0) {
+    const { data, error } = await supabase.from('items')
+      .upsert(Array.from(uniqueItemsInChar.values()), { onConflict: 'name, part_id' })
+      .select();
+    if (!error && data) {
+      data.forEach(item => itemCache.set(`${item.name}|${item.part_id}`, item.item_id));
+      for (const item of items) {
+        const id = itemCache.get(`${item.name}|${item.part_id}`);
+        if (id) ids.push(id);
+      }
     }
+  }
+  return [...new Set(ids)];
+}
 
-    // 4. DB Upsert
+async function getOcid(characterName, serverName) {
+  try {
+    const resp = await axios.get('https://open.api.nexon.com/baram/v1/id', {
+      params: { character_name: characterName, server_name: serverName },
+      headers: { 'x-nxopen-api-key': NEXON_API_KEY }
+    });
+    return resp.data.ocid;
+  } catch { return null; }
+}
+
+async function processCharacter(characterName, serverName, dbServerId, jobCode) {
+  try {
+    const ocid = await getOcid(characterName, serverName);
+    if (!ocid) return;
+
+    const [basicResp, equipResp] = await Promise.all([
+      axios.get('https://open.api.nexon.com/baram/v1/character/basic', { params: { ocid }, headers: { 'x-nxopen-api-key': NEXON_API_KEY } }),
+      axios.get('https://open.api.nexon.com/baram/v1/character/item-equipment', { params: { ocid }, headers: { 'x-nxopen-api-key': NEXON_API_KEY } })
+    ]);
+
+    const itemsToProcess = (equipResp.data.item_equipment || [])
+      .filter(i => i.item_id)
+      .map(i => ({ name: i.item_id, part_id: PART_MAP[i.item_equipment_slot_name] || 23 }));
+
+    const itemIds = await getOrCreateItemIds(itemsToProcess);
+
     await supabase.from('users').upsert({
-      server_id: serverId,
-      character_name: char.name,
-      level: level,
-      equipment_ids: itemIds
+      server_id: dbServerId,
+      character_name: characterName,
+      job_id: jobCode,
+      level: basicResp.data.character_level,
+      equipment_ids: itemIds,
+      updated_at: new Date().toISOString()
     }, { onConflict: 'server_id, character_name' });
 
     process.stdout.write('.');
-  } catch (err) {
-    // 404 등 캐릭터 정보가 없는 경우 무시
-  }
+  } catch { /* skip */ }
 }
 
-function generateItemId(name, part) {
-  let hash = 0;
-  const str = name + part;
-  for (let i = 0; i < str.length; i++) {
-    hash = ((hash << 5) - hash) + str.charCodeAt(i);
-    hash |= 0;
+async function findLastPage(serverCode, jobCode) {
+  let low = 0, high = 4999, lastGoodPage = -1;
+  while (low <= high) {
+    let mid = Math.floor((low + high) / 2);
+    const startRank = (mid * 20) + 1;
+    const url = `https://baram.nexon.com/Rank/List?maskGameCode=${serverCode}&n4Rank_start=${startRank}&codeGameJob=${jobCode}`;
+    try {
+      const resp = await fetchWithRetry(url);
+      const $ = cheerio.load(resp.data);
+      const firstCharPromotion = parseInt($('tr:nth-child(2) td:nth-child(6)').text()) || 0;
+      const hasCharacters = $('tr').length > 1;
+
+      if (hasCharacters && firstCharPromotion >= TARGET_PROMOTION_LEVEL) {
+        lastGoodPage = mid;
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    } catch { high = mid - 1; }
   }
-  return (Math.abs(hash) % 30000) + 1;
+  return lastGoodPage;
+}
+
+async function fetchCharacterNamesFromWeb(serverCode, jobCode) {
+  const names = [];
+  try {
+    const lastPage = await findLastPage(serverCode, jobCode);
+    if (lastPage === -1) return [];
+
+    console.log(`    [*] 0 ~ ${lastPage} 페이지 병렬 수집 중...`);
+    const pages = Array.from({ length: lastPage + 1 }, (_, i) => i);
+
+    await Promise.all(pages.map(page => webLimit(async () => {
+      const startRank = (page * 20) + 1;
+      const url = `https://baram.nexon.com/Rank/List?maskGameCode=${serverCode}&n4Rank_start=${startRank}&codeGameJob=${jobCode}`;
+      const response = await fetchWithRetry(url);
+      const $ = cheerio.load(response.data);
+
+      $('tr').each((_, el) => {
+        const name = $(el).find('td:nth-child(3)').text().trim();
+        const promotion = parseInt($(el).find('td:nth-child(6)').text()) || 0;
+        if (name && promotion >= TARGET_PROMOTION_LEVEL) names.push(name);
+      });
+    })));
+  } catch (err) {
+    console.error(`\n❌ 웹 크롤링 최종 실패: ${err.message}`);
+  }
+  return [...new Set(names)];
+}
+
+async function cleanupOldData() {
+  console.log('\n[*] 2일 이상 경과된 오래된 데이터 정리 중...');
+  const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+  const { count, error } = await supabase.from('users').delete().lt('updated_at', twoDaysAgo);
+  if (error) console.error('❌ 데이터 정리 실패:', error.message);
+  else console.log(`[*] 정리 완료: ${count || 0}명의 캐릭터 삭제됨`);
+}
+
+async function runPipeline() {
+  const args = process.argv.slice(2);
+  const targetJobArg = args.find(a => a.startsWith('--job='))?.split('=')[1];
+  const targetServerArg = args.find(a => a.startsWith('--server='))?.split('=')[1];
+  const targetJob = targetJobArg ? parseInt(targetJobArg) : null;
+  const targetServer = targetServerArg || null;
+
+  console.log('>>> 초고속 경계탐색 파이프라인 가동:', new Date().toISOString());
+  await initItemCache();
+
+  for (const [serverName, nexonServerCode] of Object.entries(NEXON_SERVERS)) {
+    if (targetServer && serverName !== targetServer) continue;
+    for (const jobCode of JOBS) {
+      if (targetJob !== null && jobCode !== targetJob) continue;
+      const dbServerId = DB_SERVER_IDS[serverName];
+      console.log(`\n[*] 수집 중: ${serverName} (직업: ${jobCode})`);
+      const characterNames = await fetchCharacterNamesFromWeb(nexonServerCode, jobCode);
+      console.log(`    -> ${characterNames.length}명의 캐릭터명 수집됨`);
+      await Promise.all(characterNames.map(name => limit(() => processCharacter(name, serverName, dbServerId, jobCode))));
+    }
+  }
+
+  if (targetJob === null && targetServer === null) {
+    await cleanupOldData();
+  }
+  console.log('\n>>> 파이프라인 완료');
 }
 
 runPipeline().catch(console.error);
