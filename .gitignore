@@ -33,4 +33,3 @@ schema.sql
 # 깃 설정 및 기타 제외
 .git/
 wrangler.toml
-package-lock.json
