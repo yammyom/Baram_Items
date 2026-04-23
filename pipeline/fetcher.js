@@ -14,10 +14,10 @@ export default {
     const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_ANON_KEY);
     const NEXON_API_KEY = env.NEXON_API_KEY;
 
-    const tasks = batch.messages.map(msg => 
+    const tasks = batch.messages.map(msg =>
       limit(async () => {
         const { serverName, characterName } = msg.body;
-        
+
         try {
           // 1. Get OCID
           const idResponse = await fetch(`https://open.api.nexon.com/baram/v1/id?character_name=${encodeURIComponent(characterName)}&server_name=${encodeURIComponent(serverName)}`, {
@@ -38,19 +38,19 @@ export default {
             headers: { 'x-nxopen-api-key': NEXON_API_KEY }
           });
           const equipData = await equipResponse.json();
-          
+
           // 장비 데이터 추출 및 items 테이블용 정규화
           const equipmentList = equipData.item_equipment || [];
           const itemIds = [];
 
           for (const item of equipmentList) {
             if (!item.item_name) continue;
-            
+
             // 넥슨 API에서 아이템 고유 ID가 제공되지 않을 경우, 이름+부위로 해싱하거나 
             // 별도의 매핑 테이블을 운영해야 하지만 여기선 API에서 제공하는 고유 ID가 있다고 가정 (또는 생성)
             // 실제 바람 API는 item_equipment_slot_name 등으로 구분됨
             const mockItemId = generateItemId(item.item_name, item.item_equipment_slot_name);
-            
+
             // Item Upsert
             await supabase.from('items').upsert({
               item_id: mockItemId,

@@ -10,7 +10,7 @@ export default {
       '연': 131073, '무휼': 131074, '유리': 131086,
       '하자': 131087, '호동': 131088, '진': 131089
     };
-    
+
     const JOBS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]; // 모든 직업
     const TARGET_PROMOTION = 6; // 6차 승급 이상
 
@@ -22,11 +22,11 @@ export default {
         while (shouldContinue && page < 50) { // 과도한 스크래핑 방지 (상위권 위주)
           const startRank = (page * 20) + 1;
           const url = `https://baram.nexon.com/Rank/List?maskGameCode=${serverCode}&n4Rank_start=${startRank}&codeGameJob=${jobCode}`;
-          
+
           try {
             const response = await fetch(url);
             const html = await response.text();
-            
+
             // Note: Cloudflare Workers에서는 외부 라이브러리(cheerio) 없이 정규표현식이나 HTMLRewriter를 사용하거나,
             // npm install cheerio 후 wrangler로 번들링해야 합니다. 여기서는 로직 중심의 의사코드를 포함합니다.
             const characters = parseRankingPage(html); // 스크래핑 함수 (아래 구현 참고)
@@ -34,7 +34,7 @@ export default {
             if (characters.length === 0) break;
 
             const targetUsers = characters.filter(u => u.promotion >= TARGET_PROMOTION);
-            
+
             for (const user of targetUsers) {
               await env.BARAM_QUEUE.send({
                 serverName,
@@ -69,7 +69,7 @@ function parseRankingPage(html) {
   // 실제 구현시 cheerio 사용 권장 (npm install cheerio)
   // 예시: const $ = cheerio.load(html); 
   // $('tr').each(...)
-  
+
   // 여기서는 간단한 정규식으로 예시 구현
   const rowRegex = /<tr>.*?<td>(\d+)<\/td>.*?<td>.*?<\/td>.*?<td>(.*?)<\/td>.*?<td>.*?<\/td>.*?<td>.*?<\/td>.*?<td>(\d+)차<\/td>.*?<\/tr>/gs;
   let match;
