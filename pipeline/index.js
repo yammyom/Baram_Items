@@ -11,7 +11,7 @@ const NEXON_SERVERS = { '연': 131073, '무휼': 131074, '유리': 131086, '하�
 const DB_SERVER_IDS = { '연': 1, '무휼': 2, '유리': 3, '하자': 4, '호동': 5, '진': 6 };
 const JOBS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
 
-const TARGET_PROMOTION_LEVEL = 8;
+const TARGET_PROMOTION_LEVEL = 6;
 const BATCH_SIZE = 50; // 한 번에 저장할 캐릭터 수
 
 const PART_MAP = {
@@ -65,7 +65,7 @@ async function getOrCreateItemIds(items) {
     const { data, error } = await supabase.from('items')
       .upsert(Array.from(uniqueInThisCall.values()), { onConflict: 'name, part_id' })
       .select();
-    
+
     if (!error && data) {
       data.forEach(item => itemCache.set(`${item.name}|${item.part_id}`, item.item_id));
       // 다시 매핑
@@ -128,10 +128,10 @@ async function runPipeline() {
     if (targetServer && serverName !== targetServer) continue;
     for (const jobCode of JOBS) {
       if (targetJob !== null && jobCode !== targetJob) continue;
-      
+
       const dbServerId = DB_SERVER_IDS[serverName];
       console.log(`\n[*] 수집 중: ${serverName} (직업: ${jobCode})`);
-      
+
       const characterNames = await fetchCharacterNamesFromWeb(nexonServerCode, jobCode);
       console.log(`    -> ${characterNames.length}명의 캐릭터명 수집됨`);
 
@@ -146,7 +146,7 @@ async function runPipeline() {
         if (validUsers.length > 0) {
           const { error } = await supabase.from('users').upsert(validUsers, { onConflict: 'server_id, character_name' });
           if (error) console.error('\n❌ 배치 저장 실패:', error.message);
-          else process.stdout.write(`[Batch ${i/BATCH_SIZE + 1} OK] `);
+          else process.stdout.write(`[Batch ${i / BATCH_SIZE + 1} OK] `);
         }
       }
     }
