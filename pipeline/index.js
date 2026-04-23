@@ -40,7 +40,7 @@ async function scrapeRanking(serverName, jobCode) {
   const serverCode = SERVER_CODES[serverName];
   let page = 0;
 
-  while (page < 50) { // 상위 1000명 위주
+  while (page < 1) { // 상위 1000명 위주
     const startRank = (page * 20) + 1;
     const url = `https://baram.nexon.com/Rank/List?maskGameCode=${serverCode}&n4Rank_start=${startRank}&codeGameJob=${jobCode}`;
     
