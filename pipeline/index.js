@@ -1,6 +1,7 @@
 require('dotenv').config();
 const axios = require('axios');
 const cheerio = require('cheerio');
+const pLimit = require('p-limit');
 const { createClient } = require('@supabase/supabase-js');
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
@@ -11,6 +12,7 @@ const DB_SERVER_IDS = { '연': 1, '무휼': 2, '유리': 3, '하자': 4, '호동
 const JOBS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
 
 const TARGET_PROMOTION_LEVEL = 6;
+const BATCH_SIZE = 100; // 배치 크기를 100으로 상향하여 전송 횟수 최소화
 
 const PART_MAP = {
   '무기': 1, '투구': 2, '갑옷': 3, '왼손': 4, '오른손': 4,
@@ -23,6 +25,19 @@ const PART_MAP = {
 };
 
 const itemCache = new Map();
+const limit = pLimit(30); // 넥슨 API 병렬 제한
+const webLimit = pLimit(10); // 웹 크롤링 병렬 제한
+
+async function fetchWithRetry(url, params = {}, retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await axios.get(url, { params, timeout: 10000 });
+    } catch (err) {
+      if (i === retries - 1) throw err;
+      await new Promise(r => setTimeout(r, 2000 * (i + 1)));
+    }
+  }
+}
 
 async function initItemCache() {
   console.log('[*] 아이템 캐시 로드 중...');
@@ -32,34 +47,49 @@ async function initItemCache() {
   console.log(`[*] ${itemCache.size}개의 아이템 캐시 로드 완료`);
 }
 
+// 아이템 ID 일괄 처리
 async function getOrCreateItemIds(items) {
-  const ids = [];
+  const uniqueInThisCall = new Map();
+  const resultIds = [];
+
   for (const item of items) {
     const key = `${item.name}|${item.part_id}`;
     if (itemCache.has(key)) {
-      ids.push(itemCache.get(key));
+      resultIds.push(itemCache.get(key));
     } else {
-      const { data, error } = await supabase.from('items')
-        .upsert(item, { onConflict: 'name, part_id' })
-        .select();
-      if (!error && data?.[0]) {
-        const newId = data[0].item_id;
-        itemCache.set(key, newId);
-        ids.push(newId);
-      }
+      uniqueInThisCall.set(key, item);
     }
   }
-  return [...new Set(ids)];
+
+  if (uniqueInThisCall.size > 0) {
+    const { data, error } = await supabase.from('items')
+      .upsert(Array.from(uniqueInThisCall.values()), { onConflict: 'name, part_id' })
+      .select();
+    
+    if (!error && data) {
+      data.forEach(item => itemCache.set(`${item.name}|${item.part_id}`, item.item_id));
+      // 전체 다시 매핑하여 유실 방지
+      return items.map(i => itemCache.get(`${i.name}|${i.part_id}`)).filter(id => id);
+    }
+  }
+  return [...new Set(resultIds)];
 }
 
-async function processCharacter(name, serverName, dbServerId, jobCode) {
+async function getOcid(characterName, serverName) {
   try {
-    const idResp = await axios.get('https://open.api.nexon.com/baram/v1/id', {
-      params: { character_name: name, server_name: serverName },
+    const resp = await axios.get('https://open.api.nexon.com/baram/v1/id', {
+      params: { character_name: characterName, server_name: serverName },
       headers: { 'x-nxopen-api-key': NEXON_API_KEY },
-      timeout: 10000
+      timeout: 5000
     });
-    const ocid = idResp.data.ocid;
+    return resp.data.ocid;
+  } catch { return null; }
+}
+
+async function fetchCharacterData(name, serverName, dbServerId, jobCode) {
+  try {
+    const ocid = await getOcid(name, serverName);
+    if (!ocid) return null;
 
     const [basicResp, equipResp] = await Promise.all([
       axios.get('https://open.api.nexon.com/baram/v1/character/basic', { params: { ocid }, headers: { 'x-nxopen-api-key': NEXON_API_KEY } }),
@@ -72,19 +102,15 @@ async function processCharacter(name, serverName, dbServerId, jobCode) {
 
     const itemIds = await getOrCreateItemIds(items);
 
-    await supabase.from('users').upsert({
+    return {
       server_id: dbServerId,
       character_name: name,
       job_id: jobCode,
       level: basicResp.data.character_level,
       equipment_ids: itemIds,
       updated_at: new Date().toISOString()
-    }, { onConflict: 'server_id, character_name' });
-
-    process.stdout.write('.');
-  } catch (err) {
-    // 무시하고 다음 캐릭터로
-  }
+    };
+  } catch { return null; }
 }
 
 async function findLastPage(serverCode, jobCode) {
@@ -94,18 +120,37 @@ async function findLastPage(serverCode, jobCode) {
     const startRank = (mid * 20) + 1;
     const url = `https://baram.nexon.com/Rank/List?maskGameCode=${serverCode}&n4Rank_start=${startRank}&codeGameJob=${jobCode}`;
     try {
-      const resp = await axios.get(url, { timeout: 10000 });
+      const resp = await fetchWithRetry(url);
       const $ = cheerio.load(resp.data);
       const firstPromotion = parseInt($('tr:nth-child(2) td:nth-child(6)').text()) || 0;
       if ($('tr').length > 1 && firstPromotion >= TARGET_PROMOTION_LEVEL) {
         lastGoodPage = mid;
         low = mid + 1;
-      } else {
-        high = mid - 1;
-      }
+      } else { high = mid - 1; }
     } catch { high = mid - 1; }
   }
   return lastGoodPage;
+}
+
+async function fetchCharacterNamesFromWeb(serverCode, jobCode) {
+  const names = [];
+  try {
+    const lastPage = await findLastPage(serverCode, jobCode);
+    if (lastPage === -1) return [];
+    const pages = Array.from({ length: lastPage + 1 }, (_, i) => i);
+    await Promise.all(pages.map(page => webLimit(async () => {
+      const startRank = (page * 20) + 1;
+      const url = `https://baram.nexon.com/Rank/List?maskGameCode=${serverCode}&n4Rank_start=${startRank}&codeGameJob=${jobCode}`;
+      const response = await fetchWithRetry(url);
+      const $ = cheerio.load(response.data);
+      $('tr').each((_, el) => {
+        const name = $(el).find('td:nth-child(3)').text().trim();
+        const promotion = parseInt($(el).find('td:nth-child(6)').text()) || 0;
+        if (name && promotion >= TARGET_PROMOTION_LEVEL) names.push(name);
+      });
+    })));
+  } catch (err) { console.error(`\n❌ 웹 크롤링 실패: ${err.message}`); }
+  return [...new Set(names)];
 }
 
 async function runPipeline() {
@@ -113,7 +158,7 @@ async function runPipeline() {
   const targetJob = args.find(a => a.startsWith('--job='))?.split('=')[1];
   const targetServer = args.find(a => a.startsWith('--server='))?.split('=')[1];
 
-  console.log('>>> 순차 처리 모드 가동:', new Date().toISOString());
+  console.log('>>> 고성능 병렬 배칭 모드 가동:', new Date().toISOString());
   await initItemCache();
 
   for (const [serverName, serverCode] of Object.entries(NEXON_SERVERS)) {
@@ -121,29 +166,23 @@ async function runPipeline() {
     for (const jobCode of JOBS) {
       if (targetJob && jobCode !== parseInt(targetJob)) continue;
 
-      console.log(`\n[*] 수집 중: ${serverName} (직업: ${jobCode})`);
       const dbServerId = DB_SERVER_IDS[serverName];
-      const lastPage = await findLastPage(serverCode, jobCode);
-      if (lastPage === -1) continue;
+      console.log(`\n[*] 수집 중: ${serverName} (직업: ${jobCode})`);
+      
+      const characterNames = await fetchCharacterNamesFromWeb(serverCode, jobCode);
+      console.log(`    -> ${characterNames.length}명의 캐릭터명 수집됨`);
 
-      for (let page = 0; page <= lastPage; page++) {
-        const startRank = (page * 20) + 1;
-        const url = `https://baram.nexon.com/Rank/List?maskGameCode=${serverCode}&n4Rank_start=${startRank}&codeGameJob=${jobCode}`;
-        try {
-          const resp = await axios.get(url, { timeout: 10000 });
-          const $ = cheerio.load(resp.data);
-          const names = [];
-          $('tr').each((i, el) => {
-            const name = $(el).find('td:nth-child(3)').text().trim();
-            const promotion = parseInt($(el).find('td:nth-child(6)').text()) || 0;
-            if (name && promotion >= TARGET_PROMOTION_LEVEL) names.push(name);
-          });
+      for (let i = 0; i < characterNames.length; i += BATCH_SIZE) {
+        const batchNames = characterNames.slice(i, i + BATCH_SIZE);
+        const userDataBatch = await Promise.all(
+          batchNames.map(name => limit(() => fetchCharacterData(name, serverName, dbServerId, jobCode)))
+        );
 
-          for (const name of names) {
-            await processCharacter(name, serverName, dbServerId, jobCode);
-          }
-        } catch (err) {
-          console.error(`\n❌ 페이지 ${page} 로드 실패: ${err.message}`);
+        const validUsers = userDataBatch.filter(u => u !== null);
+        if (validUsers.length > 0) {
+          const { error } = await supabase.from('users').upsert(validUsers, { onConflict: 'server_id, character_name' });
+          if (error) console.error('\n❌ 배치 저장 실패:', error.message);
+          else process.stdout.write(`[Batch ${i/BATCH_SIZE + 1} OK] `);
         }
       }
     }
