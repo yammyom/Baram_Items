@@ -9,6 +9,15 @@ import { createClient } from '@supabase/supabase-js';
 
 const limit = pLimit(300); // 넥슨 API 초당 300회 제한
 
+const PART_MAP = {
+  '무기': 1, '투구': 2, '갑옷': 3, '왼손': 4, '오른손': 4,
+  '목장식': 5, '목/어깨장식': 5, '신발': 6, '망토': 7, '얼굴장식': 8,
+  '보조1': 9, '보조2': 9, '보조': 9, '장신구': 10, '세트옷': 11, '방패/보조무기': 12,
+  '캐시 무기': 13, '캐시 투구': 14, '캐시 겉옷': 15, '캐시 목장식': 16, 
+  '캐시 신발': 17, '캐시 망토': 18, '캐시 얼굴장식': 19, '캐시 장신구': 20, 
+  '캐시 세트옷': 21, '캐시 방패/보조무기': 22
+};
+
 export default {
   async queue(batch, env) {
     const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_ANON_KEY);
@@ -41,24 +50,42 @@ export default {
 
           // 장비 데이터 추출 및 items 테이블용 정규화
           const equipmentList = equipData.item_equipment || [];
+          
+          const itemsToProcess = equipmentList
+            .filter(i => i.item_name)
+            .map(i => ({
+              name: i.item_name,
+              part_id: PART_MAP[i.item_equipment_slot_name] || 23
+            }));
+
           const itemIds = [];
 
-          for (const item of equipmentList) {
-            if (!item.item_name) continue;
+          if (itemsToProcess.length > 0) {
+            // 고유한 아이템 목록만 추출 (한 캐릭터가 같은 아이템 여러 개 착용 대비)
+            const uniqueItems = Array.from(
+              new Map(itemsToProcess.map(item => [`${item.name}|${item.part_id}`, item])).values()
+            );
 
-            // 넥슨 API에서 아이템 고유 ID가 제공되지 않을 경우, 이름+부위로 해싱하거나 
-            // 별도의 매핑 테이블을 운영해야 하지만 여기선 API에서 제공하는 고유 ID가 있다고 가정 (또는 생성)
-            // 실제 바람 API는 item_equipment_slot_name 등으로 구분됨
-            const mockItemId = generateItemId(item.item_name, item.item_equipment_slot_name);
+            // Item Upsert: 이름+부위 조합을 기준으로 DB에 생성/업데이트 후 자동 생성된 item_id 받아오기
+            const { data, error } = await supabase.from('items')
+              .upsert(uniqueItems, { onConflict: 'name, part_id' })
+              .select('item_id, name, part_id');
 
-            // Item Upsert
-            await supabase.from('items').upsert({
-              item_id: mockItemId,
-              name: item.item_name,
-              part: item.item_equipment_slot_name
-            }, { onConflict: 'item_id' });
+            if (!error && data) {
+              const idMap = new Map(data.map(d => [`${d.name}|${d.part_id}`, d.item_id]));
+              for (const item of itemsToProcess) {
+                const id = idMap.get(`${item.name}|${item.part_id}`);
+                if (id) itemIds.push(id);
+              }
+            } else if (error) {
+              console.error('Error upserting items:', error);
+            }
+          }
 
-            itemIds.push(mockItemId);
+          // 장비가 없는 캐릭터는 저장하지 않고 종료 (불필요한 DB 용량/IO 소모 방지)
+          if (itemIds.length === 0) {
+            msg.ack();
+            return;
           }
 
           // 4. User Upsert (Unique constraint: server_id, character_name)
@@ -88,15 +115,4 @@ function getServerId(name) {
   const mapping = { '연': 1, '무휼': 2, '유리': 3, '하자': 4, '호동': 5, '진': 6 };
   return mapping[name] || 0;
 }
-
-// 아이템 고유 ID 생성을 위한 간단한 해시 함수 (최대 30,000개 제한 고려)
-function generateItemId(name, part) {
-  let hash = 0;
-  const str = name + part;
-  for (let i = 0; i < str.length; i++) {
-    hash = ((hash << 5) - hash) + str.charCodeAt(i);
-    hash |= 0;
-  }
-  // SMALLINT(32767) 범위 내로 조정
-  return (Math.abs(hash) % 30000) + 1;
-}
+
