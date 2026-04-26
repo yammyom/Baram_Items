@@ -24,6 +24,7 @@ const PART_MAP = {
 };
 
 const itemCache = new Map();
+const inFlightRequests = new Map(); // 중복 DB 등록 방지용 락
 const limit = pLimit(30);
 const webLimit = pLimit(10); // 안정성을 위해 10으로 하향
 
@@ -49,25 +50,80 @@ async function initItemCache() {
 
 async function getOrCreateItemIds(items) {
   const ids = [];
-  const uniqueItemsInChar = new Map();
+  const itemsToInsert = [];
+  const inFlightPromises = [];
+
+  // 1. 캐시 및 진행 중인 요청 확인
   for (const item of items) {
     const key = `${item.name}|${item.part_id}`;
-    if (itemCache.has(key)) ids.push(itemCache.get(key));
-    else uniqueItemsInChar.set(key, item);
-  }
-
-  if (uniqueItemsInChar.size > 0) {
-    const { data, error } = await supabase.from('items')
-      .upsert(Array.from(uniqueItemsInChar.values()), { onConflict: 'name, part_id' })
-      .select();
-    if (!error && data) {
-      data.forEach(item => itemCache.set(`${item.name}|${item.part_id}`, item.item_id));
-      for (const item of items) {
-        const id = itemCache.get(`${item.name}|${item.part_id}`);
-        if (id) ids.push(id);
-      }
+    if (itemCache.has(key)) {
+      ids.push(itemCache.get(key));
+    } else if (inFlightRequests.has(key)) {
+      // 이미 DB에 등록 중이라면 대기 리스트에 추가
+      inFlightPromises.push(inFlightRequests.get(key));
+    } else {
+      itemsToInsert.push(item);
     }
   }
+
+  // 진행 중인 등록 작업이 있다면 동시 대기
+  if (inFlightPromises.length > 0) {
+    await Promise.all(inFlightPromises);
+  }
+
+  // 다른 요청에 의해 캐시에 들어왔는지 재확인
+  const realItemsToInsert = [];
+  for (const item of itemsToInsert) {
+    const key = `${item.name}|${item.part_id}`;
+    if (itemCache.has(key)) {
+      ids.push(itemCache.get(key));
+    } else {
+      realItemsToInsert.push(item);
+    }
+  }
+
+  // 2. 캐시에 없는 새 아이템들을 DB에 등록
+  if (realItemsToInsert.length > 0) {
+    const uniqueItems = new Map();
+    for (const item of realItemsToInsert) {
+      uniqueItems.set(`${item.name}|${item.part_id}`, item);
+    }
+
+    const insertPromise = (async () => {
+      try {
+        const { data, error } = await supabase.from('items')
+          .upsert(Array.from(uniqueItems.values()), { onConflict: 'name, part_id' })
+          .select();
+
+        if (!error && data) {
+          data.forEach(item => itemCache.set(`${item.name}|${item.part_id}`, item.item_id));
+        }
+      } catch (err) {
+        console.error('❌ 장비 DB 저장 중 에러 발생:', err.message);
+      }
+    })();
+
+    // 동시성 요청들이 이 Promise를 대기할 수 있도록 등록
+    for (const key of uniqueItems.keys()) {
+      inFlightRequests.set(key, insertPromise);
+    }
+
+    await insertPromise;
+
+    // 작업 종료 후 Map에서 제거
+    for (const key of uniqueItems.keys()) {
+      inFlightRequests.delete(key);
+    }
+  }
+
+  // 3. 최종 할당된 ID 수집
+  for (const item of items) {
+    const key = `${item.name}|${item.part_id}`;
+    if (itemCache.has(key)) {
+      ids.push(itemCache.get(key));
+    }
+  }
+
   return [...new Set(ids)];
 }
 
@@ -179,8 +235,8 @@ async function runPipeline() {
   const targetServerArg = args.find(a => a.startsWith('--server='))?.split('=')[1];
   const targetJob = targetJobArg ? parseInt(targetJobArg) : null;
   const targetServer = targetServerArg || null;
-
-  console.log('>>> 초고속 경계탐색 파이프라인 가동:', new Date().toISOString());
+  const start = new Date().getTime();
+  console.log('>>> 초고속 경계탐색 파이프라인 가동:', TARGET_PROMOTION_LEVEL, '차 까지', start);
   await initItemCache();
 
   for (const [serverName, nexonServerCode] of Object.entries(NEXON_SERVERS)) {
@@ -198,7 +254,7 @@ async function runPipeline() {
   if (targetJob === null && targetServer === null) {
     await cleanupOldData();
   }
-  console.log('\n>>> 파이프라인 완료');
+  console.log('\n>>> 파이프라인 완료', new Date().getTime() - start, 'ms');
 }
 
 runPipeline().catch(console.error);
