@@ -18,9 +18,16 @@ const PART_MAP = {
   '무기': 1, '투구': 2, '갑옷': 3, '왼손': 4, '오른손': 4,
   '목장식': 5, '목/어깨장식': 5, '신발': 6, '망토': 7, '얼굴장식': 8,
   '보조1': 9, '보조2': 9, '보조': 9, '장신구': 10, '세트옷': 11, '방패/보조무기': 12,
-  '캐시 무기': 13, '캐시 투구': 14, '캐시 겉옷': 15, '캐시 목장식': 16,
-  '캐시 신발': 17, '캐시 망토': 18, '캐시 얼굴장식': 19, '캐시 장신구': 20,
-  '캐시 세트옷': 21, '캐시 방패/보조무기': 22
+  '캐시 무기': 13, '캐시무기': 13,
+  '캐시 투구': 14, '캐시투구': 14,
+  '캐시 겉옷': 15, '캐시겉옷': 15,
+  '캐시 목장식': 16, '캐시목장식': 16,
+  '캐시 신발': 17, '캐시신발': 17,
+  '캐시 망토': 18, '캐시망토': 18,
+  '캐시 얼굴장식': 19, '캐시얼굴장식': 19,
+  '캐시 장신구': 20, '캐시장신구': 20,
+  '캐시 세트옷': 21, '캐시세트옷': 21,
+  '캐시 방패/보조무기': 22, '캐시방패/보조무기': 22
 };
 
 const itemCache = new Map();
@@ -57,7 +64,7 @@ async function getOrCreateItemIds(items) {
   for (const item of items) {
     const key = `${item.name}|${item.part_id}`;
     if (itemCache.has(key)) {
-      ids.push(itemCache.get(key));
+      // 이미 캐시에 있는 경우 최종 단계에서 수집 (중복 삽입 방지)
     } else if (inFlightRequests.has(key)) {
       // 이미 DB에 등록 중이라면 대기 리스트에 추가
       inFlightPromises.push(inFlightRequests.get(key));
@@ -76,7 +83,7 @@ async function getOrCreateItemIds(items) {
   for (const item of itemsToInsert) {
     const key = `${item.name}|${item.part_id}`;
     if (itemCache.has(key)) {
-      ids.push(itemCache.get(key));
+      // 이미 캐시에 있는 경우 최종 단계에서 수집 (중복 삽입 방지)
     } else {
       realItemsToInsert.push(item);
     }
@@ -149,8 +156,8 @@ async function processCharacter(characterName, serverName, dbServerId, jobCode) 
 
     const PET_NAMES = ["주작", "현무", "백호", "청룡", "황룡", "혼돈", "도올", "궁기", "도철", "고대불의", "고대바람의", "고대땅의", "고대물의", "생명의목걸이"];
     const itemsToProcessRaw = (equipResp.data.item_equipment || [])
-      .filter(i => i.item_id)
-      .map(i => ({ name: i.item_id, part_id: PART_MAP[i.item_equipment_slot_name] || 23 }))
+      .filter(i => i.item_name)
+      .map(i => ({ name: i.item_name, part_id: PART_MAP[i.item_equipment_slot_name] || 23 }))
       .filter(item => {
         const hasPrefix = PET_NAMES.some(prefix => item.name.startsWith(prefix));
         const hasSuffix = /\d+성$/.test(item.name);
