@@ -148,7 +148,7 @@ async function processCharacter(characterName, serverName, dbServerId, jobCode) 
     ]);
 
     const PET_NAMES = ["주작", "현무", "백호", "청룡", "황룡", "혼돈", "도올", "궁기", "도철", "고대불의", "고대바람의", "고대땅의", "고대물의", "생명의목걸이"];
-    const itemsToProcess = (equipResp.data.item_equipment || [])
+    const itemsToProcessRaw = (equipResp.data.item_equipment || [])
       .filter(i => i.item_id)
       .map(i => ({ name: i.item_id, part_id: PART_MAP[i.item_equipment_slot_name] || 23 }))
       .filter(item => {
@@ -156,6 +156,16 @@ async function processCharacter(characterName, serverName, dbServerId, jobCode) 
         const hasSuffix = /\d+성$/.test(item.name);
         return !(hasPrefix && hasSuffix);
       });
+
+    const partCounts = {};
+    const itemsToProcess = [];
+    for (const item of itemsToProcessRaw) {
+      const limit = (item.part_id === 4 || item.part_id === 9) ? 2 : 1;
+      partCounts[item.part_id] = (partCounts[item.part_id] || 0) + 1;
+      if (partCounts[item.part_id] <= limit) {
+        itemsToProcess.push(item);
+      }
+    }
 
     const itemIds = await getOrCreateItemIds(itemsToProcess);
 
