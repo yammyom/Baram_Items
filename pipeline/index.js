@@ -124,7 +124,7 @@ async function getOrCreateItemIds(items) {
     }
   }
 
-  return [...new Set(ids)];
+  return ids;
 }
 
 async function getOcid(characterName, serverName) {
@@ -147,9 +147,15 @@ async function processCharacter(characterName, serverName, dbServerId, jobCode) 
       axios.get('https://open.api.nexon.com/baram/v1/character/item-equipment', { params: { ocid }, headers: { 'x-nxopen-api-key': NEXON_API_KEY } })
     ]);
 
+    const PET_NAMES = ["주작", "현무", "백호", "청룡", "황룡", "혼돈", "도올", "궁기", "도철", "고대불의", "고대바람의", "고대땅의", "고대물의", "생명의목걸이"];
     const itemsToProcess = (equipResp.data.item_equipment || [])
       .filter(i => i.item_id)
-      .map(i => ({ name: i.item_id, part_id: PART_MAP[i.item_equipment_slot_name] || 23 }));
+      .map(i => ({ name: i.item_id, part_id: PART_MAP[i.item_equipment_slot_name] || 23 }))
+      .filter(item => {
+        const hasPrefix = PET_NAMES.some(prefix => item.name.startsWith(prefix));
+        const hasSuffix = /\d+성$/.test(item.name);
+        return !(hasPrefix && hasSuffix);
+      });
 
     const itemIds = await getOrCreateItemIds(itemsToProcess);
 
@@ -158,10 +164,14 @@ async function processCharacter(characterName, serverName, dbServerId, jobCode) 
       return;
     }
 
+    const genderStr = basicResp.data.character_gender;
+    const genderCode = genderStr === 'M' ? 1 : (genderStr === 'F' ? 2 : null);
+
     await supabase.from('users').upsert({
       server_id: dbServerId,
       character_name: characterName,
       job_id: jobCode,
+      gender: genderCode,
       level: basicResp.data.character_level,
       equipment_ids: itemIds,
       updated_at: new Date().toISOString()
