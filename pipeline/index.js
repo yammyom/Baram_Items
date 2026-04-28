@@ -155,9 +155,17 @@ async function processCharacter(characterName, serverName, dbServerId, jobCode) 
     ]);
 
     const PET_NAMES = ["주작", "현무", "백호", "청룡", "황룡", "혼돈", "도올", "궁기", "도철", "고대불의", "고대바람의", "고대땅의", "고대물의", "생명의목걸이"];
+    // 1. 공백 제거 및 안전한 매핑
     const itemsToProcessRaw = (equipResp.data.item_equipment || [])
       .filter(i => i.item_name)
-      .map(i => ({ name: i.item_name, part_id: PART_MAP[i.item_equipment_slot_name] || 23 }))
+      .map(i => {
+        // 앞뒤 공백을 제거하여 PART_MAP 적중률을 높임
+        const slotName = (i.item_equipment_slot_name || '').trim();
+        return {
+          name: i.item_name.trim(),
+          part_id: PART_MAP[slotName] || 23
+        };
+      })
       .filter(item => {
         const hasPrefix = PET_NAMES.some(prefix => item.name.startsWith(prefix));
         const hasSuffix = /\d+성$/.test(item.name);
@@ -166,12 +174,20 @@ async function processCharacter(characterName, serverName, dbServerId, jobCode) 
 
     const partCounts = {};
     const itemsToProcess = [];
+
+    // 2. 23번 예외 처리 및 한도 로직 강화
     for (const item of itemsToProcessRaw) {
-      const limit = (item.part_id === 4 || item.part_id === 9) ? 2 : 1;
-      partCounts[item.part_id] = (partCounts[item.part_id] || 0) + 1;
-      if (partCounts[item.part_id] <= limit) {
-        itemsToProcess.push(item);
+      // 23번(미분류/기타) 부위는 개수 제한을 두지 않고 무조건 살립니다.
+      if (item.part_id !== 23) {
+        const limit = (item.part_id === 4 || item.part_id === 9) ? 2 : 1;
+        partCounts[item.part_id] = (partCounts[item.part_id] || 0) + 1;
+
+        // 허용 개수를 초과한 장비(프리셋 등)는 배열에 담지 않고 버림
+        if (partCounts[item.part_id] > limit) {
+          continue;
+        }
       }
+      itemsToProcess.push(item);
     }
 
     const itemIds = await getOrCreateItemIds(itemsToProcess);
