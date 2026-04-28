@@ -66,13 +66,13 @@ export default {
           // 장비 데이터 추출 및 items 테이블용 정규화
           const PET_NAMES = ["주작", "현무", "백호", "청룡", "황룡", "혼돈", "도올", "궁기", "도철", "고대불의", "고대바람의", "고대땅의", "고대물의", "생명의목걸이"];
           // 1. 공백 제거 및 안전한 매핑
-          const itemsToProcessRaw = (equipResp.data.item_equipment || [])
-            .filter(i => i.item_name)
+          const itemsToProcessRaw = (equipData.item_equipment || [])
+            .filter(i => i.item_id)
             .map(i => {
               // 앞뒤 공백을 제거하여 PART_MAP 적중률을 높임
               const slotName = (i.item_equipment_slot_name || '').trim();
               return {
-                name: i.item_name.trim(),
+                name: i.item_id.trim(),
                 part_id: PART_MAP[slotName] || 23
               };
             })
