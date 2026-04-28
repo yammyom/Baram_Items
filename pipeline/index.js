@@ -9,7 +9,7 @@ const NEXON_API_KEY = process.env.NEXON_API_KEY;
 
 const NEXON_SERVERS = { '연': 131073, '무휼': 131074, '유리': 131086, '하자': 131087, '호동': 131088, '진': 131089 };
 const DB_SERVER_IDS = { '연': 1, '무휼': 2, '유리': 3, '하자': 4, '호동': 5, '진': 6 };
-const JOBS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+const JOBS = [4, 5, 6, 7, 8, 9, 10, 11];
 
 // 목표 승급 단계 (7차 이상)
 const TARGET_PROMOTION_LEVEL = 7;
