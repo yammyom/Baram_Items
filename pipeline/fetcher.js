@@ -33,10 +33,10 @@ const PART_MAP = {
 export default {
   async queue(batch, env) {
     const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_ANON_KEY);
-    const supabase2 = (env.SUPABASE_URL2 && env.SUPABASE_ANON_KEY2) 
-      ? createClient(env.SUPABASE_URL2, env.SUPABASE_ANON_KEY2) 
+    const supabase2 = (env.SUPABASE_URL2 && env.SUPABASE_ANON_KEY2)
+      ? createClient(env.SUPABASE_URL2, env.SUPABASE_ANON_KEY2)
       : null;
-      
+
     const NEXON_API_KEY = env.NEXON_API_KEY;
 
     const tasks = batch.messages.map(msg =>
@@ -117,7 +117,7 @@ export default {
             const promises = [
               supabase.from('items').upsert(uniqueItems, { onConflict: 'name, part_id' }).select('item_id, name, part_id')
             ];
-            
+
             if (supabase2) {
               promises.push(
                 supabase2.from('items').upsert(uniqueItems, { onConflict: 'name, part_id' }).select('item_id, name, part_id')
@@ -125,7 +125,7 @@ export default {
             }
 
             const results = await Promise.all(promises);
-            
+
             // Primary DB Item ID 매핑
             const primaryRes = results[0];
             if (!primaryRes.error && primaryRes.data) {
@@ -162,7 +162,7 @@ export default {
           // 4. User Upsert (Unique constraint: server_id, character_name)
           const serverId = getServerId(serverName);
           const userPromises = [];
-          
+
           if (itemIds.length > 0) {
             userPromises.push(
               supabase.from('users').upsert({
@@ -176,7 +176,7 @@ export default {
               }, { onConflict: 'server_id, character_name' })
             );
           }
-          
+
           if (supabase2 && itemIds2.length > 0) {
             userPromises.push(
               supabase2.from('users').upsert({
@@ -208,6 +208,6 @@ export default {
 
 // 서버명 -> 매핑 ID (1~6)
 function getServerId(name) {
-  const mapping = { '연': 1, '무휼': 2, '유리': 3, '하자': 4, '호동': 5, '진': 6 };
+  const mapping = { '진': 6 };
   return mapping[name] || 0;
 }
