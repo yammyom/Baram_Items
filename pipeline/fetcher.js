@@ -135,7 +135,14 @@ export default {
                 if (id) itemIds.push(id);
               }
             } else if (primaryRes.error) {
-              console.error('Error upserting items to primary DB:', primaryRes.error);
+              if (!global.mainDbErrorLoggedFetcher) {
+                if (primaryRes.error.message.includes('exceed_egress_quota') || primaryRes.error.message.includes('restricted')) {
+                  console.error('\n❌ 메인 DB 사용량 초과: 이후 메인 DB 에러 로그는 생략됩니다.');
+                  global.mainDbErrorLoggedFetcher = true;
+                } else {
+                  console.error('Error upserting items to primary DB:', primaryRes.error);
+                }
+              }
             }
 
             // Secondary DB Item ID 매핑
@@ -208,6 +215,6 @@ export default {
 
 // 서버명 -> 매핑 ID (1~6)
 function getServerId(name) {
-  const mapping = { '진': 6 };
+  const mapping = { '연': 1, '무휼': 2, '유리': 3, '하자': 4, '호동': 5, '진': 6 };
   return mapping[name] || 0;
 }

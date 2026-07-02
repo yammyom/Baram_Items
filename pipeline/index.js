@@ -16,7 +16,7 @@ const DB_SERVER_IDS = { '연': 1, '무휼': 2, '유리': 3, '하자': 4, '호동
 const JOBS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
 
 // 목표 승급 단계 범위 (하향 N차 ~ 상향 M차)
-const MIN_PROMOTION_LEVEL = 7; // 하향 승급
+const MIN_PROMOTION_LEVEL = 9; // 하향 승급
 const MAX_PROMOTION_LEVEL = 9; // 상향 승급
 
 const PART_MAP = {
@@ -57,12 +57,19 @@ async function initItemCache() {
   console.log('[*] 아이템 캐시 로드 중...');
   const promises = [supabase.from('items').select('item_id, name, part_id')];
   if (supabase2) promises.push(supabase2.from('items').select('item_id, name, part_id'));
-  
+
   const results = await Promise.all(promises);
   const primaryRes = results[0];
-  
+
   if (primaryRes.error) {
-    console.error('❌ 메인 DB 캐시 로드 실패:', primaryRes.error.message);
+    if (!global.mainDbErrorLogged) {
+      if (primaryRes.error.message.includes('exceed_egress_quota') || primaryRes.error.message.includes('restricted')) {
+        console.error('\n❌ 메인 DB 사용량 초과: 이후 메인 DB 에러 로그는 생략됩니다.');
+        global.mainDbErrorLogged = true;
+      } else {
+        console.error('❌ 메인 DB 캐시 로드 실패:', primaryRes.error.message);
+      }
+    }
   } else {
     primaryRes.data.forEach(item => itemCache.set(`${item.name}|${item.part_id}`, item.item_id));
     console.log(`[*] 메인 DB: ${itemCache.size}개의 아이템 캐시 로드 완료`);
@@ -91,7 +98,7 @@ async function getOrCreateItemIds(items) {
     // 양쪽 DB 모두에 존재하는지 체크, 하나라도 없으면 insert 대상
     const hasPrimary = itemCache.has(key);
     const hasSecondary = supabase2 ? itemCache2.has(key) : true;
-    
+
     if (hasPrimary && hasSecondary) {
       // 이미 캐시에 있는 경우 최종 단계에서 수집
     } else if (inFlightRequests.has(key)) {
@@ -113,7 +120,7 @@ async function getOrCreateItemIds(items) {
     const key = `${item.name}|${item.part_id}`;
     const hasPrimary = itemCache.has(key);
     const hasSecondary = supabase2 ? itemCache2.has(key) : true;
-    
+
     if (hasPrimary && hasSecondary) {
       // 캐시 적중
     } else {
@@ -135,26 +142,33 @@ async function getOrCreateItemIds(items) {
         if (supabase2) {
           promises.push(supabase2.from('items').upsert(Array.from(uniqueItems.values()), { onConflict: 'name, part_id' }).select());
         }
-        
+
         const results = await Promise.all(promises);
-        
+
         const primaryRes = results[0];
         if (!primaryRes.error && primaryRes.data) {
           primaryRes.data.forEach(item => itemCache.set(`${item.name}|${item.part_id}`, item.item_id));
         } else if (primaryRes.error) {
-          console.error('❌ 메인 DB 장비 저장 중 에러:', primaryRes.error.message);
+          if (!global.mainDbErrorLogged) {
+            if (primaryRes.error.message.includes('exceed_egress_quota') || primaryRes.error.message.includes('restricted')) {
+              console.error('\n❌ 메인 DB 사용량 초과: 이후 메인 DB 에러 로그는 생략됩니다.');
+              global.mainDbErrorLogged = true;
+            } else {
+              console.error('\n❌ 메인 DB 장비 저장 중 에러:', primaryRes.error.message);
+            }
+          }
         }
-        
+
         if (supabase2 && results[1]) {
           const secondaryRes = results[1];
           if (!secondaryRes.error && secondaryRes.data) {
             secondaryRes.data.forEach(item => itemCache2.set(`${item.name}|${item.part_id}`, item.item_id));
           } else if (secondaryRes.error) {
-            console.error('❌ 서브 DB 장비 저장 중 에러:', secondaryRes.error.message);
+            console.error('\n❌ 서브 DB 장비 저장 중 에러:', secondaryRes.error.message);
           }
         }
       } catch (err) {
-        console.error('❌ 장비 DB 저장 중 예기치 못한 에러 발생:', err.message);
+        console.error('\n❌ 장비 DB 저장 중 예기치 못한 에러 발생:', err.message);
       }
     })();
 
@@ -248,7 +262,7 @@ async function processCharacter(characterName, serverName, dbServerId, jobCode) 
     const genderCode = genderStr === 'M' ? 1 : (genderStr === 'F' ? 2 : null);
 
     const userPromises = [];
-    
+
     if (itemIds.length > 0) {
       userPromises.push(
         supabase.from('users').upsert({
@@ -262,7 +276,7 @@ async function processCharacter(characterName, serverName, dbServerId, jobCode) 
         }, { onConflict: 'server_id, character_name' })
       );
     }
-    
+
     if (supabase2 && itemIds2.length > 0) {
       userPromises.push(
         supabase2.from('users').upsert({
@@ -336,19 +350,19 @@ async function fetchCharacterNamesFromWeb(serverCode, jobCode) {
 async function cleanupOldData() {
   console.log('\n[*] 2일 이상 경과된 오래된 데이터 정리 중...');
   const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
-  
+
   const promises = [];
   promises.push(supabase.from('users').delete().lt('updated_at', twoDaysAgo));
   if (supabase2) {
     promises.push(supabase2.from('users').delete().lt('updated_at', twoDaysAgo));
   }
-  
+
   const results = await Promise.all(promises);
-  
+
   const primaryRes = results[0];
   if (primaryRes.error) console.error('❌ 메인 DB 데이터 정리 실패:', primaryRes.error.message);
   else console.log(`[*] 메인 DB 정리 완료: ${primaryRes.count || 0}명의 캐릭터 삭제됨`);
-  
+
   if (supabase2 && results[1]) {
     const secondaryRes = results[1];
     if (secondaryRes.error) console.error('❌ 서브 DB 데이터 정리 실패:', secondaryRes.error.message);
