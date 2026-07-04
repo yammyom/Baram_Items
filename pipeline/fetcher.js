@@ -33,10 +33,6 @@ const PART_MAP = {
 export default {
   async queue(batch, env) {
     const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_ANON_KEY);
-    const supabase2 = (env.SUPABASE_URL2 && env.SUPABASE_ANON_KEY2)
-      ? createClient(env.SUPABASE_URL2, env.SUPABASE_ANON_KEY2)
-      : null;
-
     const NEXON_API_KEY = env.NEXON_API_KEY;
 
     const tasks = batch.messages.map(msg =>
@@ -104,101 +100,33 @@ export default {
             itemsToProcess.push(item);
           }
 
-          const itemIds = [];
-          const itemIds2 = [];
-
-          if (itemsToProcess.length > 0) {
-            // 고유한 아이템 목록만 추출 (한 캐릭터가 같은 아이템 여러 개 착용 대비)
-            const uniqueItems = Array.from(
-              new Map(itemsToProcess.map(item => [`${item.name}|${item.part_id}`, item])).values()
-            );
-
-            // Item Upsert: 이름+부위 조합을 기준으로 DB에 생성/업데이트 후 자동 생성된 item_id 받아오기
-            const promises = [
-              supabase.from('items').upsert(uniqueItems, { onConflict: 'name, part_id' }).select('item_id, name, part_id')
-            ];
-
-            if (supabase2) {
-              promises.push(
-                supabase2.from('items').upsert(uniqueItems, { onConflict: 'name, part_id' }).select('item_id, name, part_id')
-              );
-            }
-
-            const results = await Promise.all(promises);
-
-            // Primary DB Item ID 매핑
-            const primaryRes = results[0];
-            if (!primaryRes.error && primaryRes.data) {
-              const idMap = new Map(primaryRes.data.map(d => [`${d.name}|${d.part_id}`, d.item_id]));
-              for (const item of itemsToProcess) {
-                const id = idMap.get(`${item.name}|${item.part_id}`);
-                if (id) itemIds.push(id);
-              }
-            } else if (primaryRes.error) {
-              if (!global.mainDbErrorLoggedFetcher) {
-                if (primaryRes.error.message.includes('exceed_egress_quota') || primaryRes.error.message.includes('restricted')) {
-                  console.error('\n❌ 메인 DB 사용량 초과: 이후 메인 DB 에러 로그는 생략됩니다.');
-                  global.mainDbErrorLoggedFetcher = true;
-                } else {
-                  console.error('Error upserting items to primary DB:', primaryRes.error);
-                }
-              }
-            }
-
-            // Secondary DB Item ID 매핑
-            if (supabase2 && results[1]) {
-              const secondaryRes = results[1];
-              if (!secondaryRes.error && secondaryRes.data) {
-                const idMap2 = new Map(secondaryRes.data.map(d => [`${d.name}|${d.part_id}`, d.item_id]));
-                for (const item of itemsToProcess) {
-                  const id = idMap2.get(`${item.name}|${item.part_id}`);
-                  if (id) itemIds2.push(id);
-                }
-              } else if (secondaryRes.error) {
-                console.error('Error upserting items to secondary DB:', secondaryRes.error);
-              }
-            }
-          }
-
-          // 장비가 없는 캐릭터는 저장하지 않고 종료 (불필요한 DB 용량/IO 소모 방지)
-          if (itemIds.length === 0 && itemIds2.length === 0) {
+          if (itemsToProcess.length === 0) {
             msg.ack();
             return;
           }
 
-          // 4. User Upsert (Unique constraint: server_id, character_name)
+          // 데드락 방지를 위한 다중 정렬 (1순위: part_id 오름차순, 2순위: name 가나다순)
+          itemsToProcess.sort((a, b) => {
+            if (a.part_id !== b.part_id) return a.part_id - b.part_id;
+            return a.name.localeCompare(b.name, 'ko');
+          });
+
           const serverId = getServerId(serverName);
-          const userPromises = [];
 
-          if (itemIds.length > 0) {
-            userPromises.push(
-              supabase.from('users').upsert({
-                server_id: serverId,
-                character_name: characterName,
-                job_id: jobCode,
-                gender: genderCode,
-                level: level,
-                equipment_ids: itemIds,
-                updated_at: new Date().toISOString()
-              }, { onConflict: 'server_id, character_name' })
-            );
+          const { error } = await supabase.rpc('upsert_character_data', {
+            p_server_id: serverId,
+            p_character_name: characterName,
+            p_job_id: jobCode,
+            p_gender: genderCode,
+            p_level: level,
+            p_equipment_json: itemsToProcess
+          });
+
+          if (error) {
+            console.error(`Error processing ${characterName} (RPC):`, error.message);
+            // 실패 시 nack 처리되도록 throw
+            throw error;
           }
-
-          if (supabase2 && itemIds2.length > 0) {
-            userPromises.push(
-              supabase2.from('users').upsert({
-                server_id: serverId,
-                character_name: characterName,
-                job_id: jobCode,
-                gender: genderCode,
-                level: level,
-                equipment_ids: itemIds2,
-                updated_at: new Date().toISOString()
-              }, { onConflict: 'server_id, character_name' })
-            );
-          }
-
-          await Promise.all(userPromises);
 
           // 성공적으로 처리된 메시지 확인
           msg.ack();
@@ -218,3 +146,4 @@ function getServerId(name) {
   const mapping = { '연': 1, '무휼': 2, '유리': 3, '하자': 4, '호동': 5, '진': 6 };
   return mapping[name] || 0;
 }
+
