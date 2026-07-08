@@ -102,7 +102,7 @@ export default {
 
           if (itemsToProcess.length === 0) {
             msg.ack();
-            return;
+            return null;
           }
 
           // 데드락 방지를 위한 다중 정렬 (1순위: part_id 오름차순, 2순위: name 가나다순)
@@ -113,31 +113,57 @@ export default {
 
           const serverId = getServerId(serverName);
 
-          const { error } = await supabase.rpc('upsert_character_data', {
-            p_server_id: serverId,
-            p_character_name: characterName,
-            p_job_id: jobCode,
-            p_gender: genderCode,
-            p_level: level,
-            p_equipment_json: itemsToProcess
-          });
-
-          if (error) {
-            console.error(`Error processing ${characterName} (RPC):`, error.message);
-            // 실패 시 nack 처리되도록 throw
-            throw error;
-          }
-
-          // 성공적으로 처리된 메시지 확인
-          msg.ack();
+          return {
+            msg,
+            data: {
+              server_id: serverId,
+              character_name: characterName,
+              job_id: jobCode,
+              gender: genderCode,
+              level: level,
+              equipment_json: itemsToProcess
+            }
+          };
         } catch (err) {
-          console.error(`Error processing ${characterName}:`, err);
-          // 실패 시 재시도하도록 놔둠 (nack)
+          console.error(`Error fetching data for ${msg.body?.characterName}:`, err);
+          return null; // 넥슨 API 에러 등은 null 반환하여 배치에서 제외 (nack 처리 여부는 고민해볼 수 있으나 일시적 에러일 수 있으므로 재시도하도록 놔두지 않고 일단 null 반환)
         }
       })
     );
 
-    await Promise.all(tasks);
+    const results = await Promise.all(tasks);
+    const validResults = results.filter(Boolean);
+
+    if (validResults.length > 0) {
+      // 동일 배치 내 중복 캐릭터 방어 (ON CONFLICT DO UPDATE는 같은 행을 두 번 건드리면 에러)
+      const dedupMap = new Map();
+      for (const r of validResults) {
+        dedupMap.set(`${r.data.server_id}_${r.data.character_name}`, r);
+      }
+      const dedupedResults = [...dedupMap.values()];
+      discardedMsgs.forEach(msg => msg.ack());
+      const charactersData = dedupedResults.map(r => r.data);
+
+      try {
+        const { error } = await supabase.rpc('upsert_character_data_batch', {
+          p_characters: charactersData
+        });
+
+        if (error) {
+          console.error(`Batch RPC Error:`, error.message);
+          throw error;
+        }
+
+        // 성공적으로 저장된 메시지들만 일괄 ack 처리
+        dedupedResults.forEach(r => r.msg.ack());
+        console.log(`[+] 성공적으로 ${dedupedResults.length}명 배치 저장 및 ACK 처리 완료.`);
+      } catch (dbErr) {
+        // 핸들러가 정상 반환되면 미ack 메시지도 성공 처리로 간주함
+        // 따라서 명시적으로 retry()를 호출해야 실제로 큐가 재전송함
+        console.error(`[-] Batch DB 처리 중 에러 발생, 재시도 예약:`, dbErr.message);
+        dedupedResults.forEach(r => r.msg.retry({ delaySeconds: 5 }));
+      }
+    }
   }
 };
 
