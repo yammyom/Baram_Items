@@ -1,0 +1,22 @@
+name: Keepalive Workflow
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # 매일 자정(UTC)에 상태 체크
+  workflow_dispatch: 
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  cronjob-keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Keepalive Action
+        uses: gautamkrishnar/keepalive-workflow@v2
+        with:
+          gh_token: ${{ secrets.GITHUB_TOKEN }}

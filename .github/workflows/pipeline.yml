@@ -29,6 +29,3 @@ jobs:
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
           NEXON_API_KEY: ${{ secrets.NEXON_API_KEY }}
         run: node pipeline/index.js
-
-      - name: Keepalive Workflow
-        uses: gautamkrishnar/keepalive-workflow@v2
