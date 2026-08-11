@@ -2,21 +2,23 @@ name: Keepalive Workflow
 
 on:
   schedule:
-    - cron: '0 0 * * *' # 매일 자정(UTC)에 상태 체크
-  workflow_dispatch: 
+    - cron: '0 0 * * *' # 매일 자정 상태 체크
+  workflow_dispatch: # 수동 실행
 
 permissions:
   contents: write
-  actions: write
 
 jobs:
-  cronjob-keepalive:
+  keepalive:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        
-      - name: Keepalive Action
-        uses: gautamkrishnar/keepalive-workflow@v2
-        with:
-          gh_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create Empty Commit
+        run: |
+          git config --global user.name "yammyom"
+          git config --global user.email "yam304258@gmail.com"
+          
+          git commit --allow-empty -m "chore: keepalive commit to prevent workflow suspension"
+          git push origin HEAD
