@@ -36,3 +36,5 @@ jobs:
 
       - name: Keepalive Workflow
         uses: gautamkrishnar/keepalive-workflow@v2
+        with:
+          gh_token: ${{ secrets.GITHUB_TOKEN }}
