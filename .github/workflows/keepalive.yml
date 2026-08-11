@@ -2,7 +2,7 @@ name: Keepalive Workflow
 
 on:
   schedule:
-    - cron: '0 0 * * *' # 매일 자정 상태 체크
+    - cron: '0 0 1 * *' # 매월 1일 자정
   workflow_dispatch: # 수동 실행
 
 permissions:
