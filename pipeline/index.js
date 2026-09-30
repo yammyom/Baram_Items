@@ -11,9 +11,8 @@ const NEXON_SERVERS = { '연': 131073, '무휼': 131074, '유리': 131086, '하�
 const DB_SERVER_IDS = { '연': 1, '무휼': 2, '유리': 3, '하자': 4, '호동': 5, '진': 6 };
 const JOBS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
 
-// 목표 승급 단계 범위 (하향 N차 ~ 상향 M차)
-const MIN_PROMOTION_LEVEL = 7; // 하향 승급
-const MAX_PROMOTION_LEVEL = 9; // 상향 승급
+const MIN_PROMOTION_LEVEL = 7;
+const MAX_PROMOTION_LEVEL = 9;
 
 const PART_MAP = {
   '무기': 1, '투구': 2, '갑옷': 3, '왼손': 4, '오른손': 4,
@@ -31,28 +30,79 @@ const PART_MAP = {
   '캐시 방패/보조무기': 22, '캐시방패/보조무기': 22
 };
 
+const limit = pLimit(100);
+const webLimit = pLimit(25);
 
-const limit = pLimit(30);
-const webLimit = pLimit(10); // 안정성을 위해 10으로 하향
+const MAX_QUEUE_SIZE = 2;
+const dbQueue = [];
+let dbWorkerActive = false;
+let totalSavedUsers = 0;
 
-// 재시도 로직을 포함한 axios 래퍼
+async function startDbWorker() {
+  if (dbWorkerActive) return;
+  dbWorkerActive = true;
+
+  while (dbQueue.length > 0) {
+    const { batch, i } = dbQueue.shift();
+
+    let saved = false;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const { error } = await supabase.rpc('upsert_character_data_batch', {
+          p_characters: batch
+        });
+        if (!error) {
+          totalSavedUsers += batch.length;
+          process.stdout.write(`[${batch.length}명 저장] `);
+          saved = true;
+          break;
+        }
+        console.warn(`\n⚠️ DB 저장 실패 (${attempt}/3회): ${error.message}`);
+      } catch (err) {
+        console.warn(`\n⚠️ DB 통신 오류 (${attempt}/3회): ${err.message}`);
+      }
+      await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt - 1)));
+    }
+
+    if (!saved) {
+      console.error(`\n❌ [치명적] 배치 영구 실패 (${i} ~ ${i + batch.length})`);
+    }
+  }
+
+  dbWorkerActive = false;
+}
+
+async function enqueueBatch(batch, i) {
+  while (dbQueue.length >= MAX_QUEUE_SIZE) {
+    await new Promise(r => setTimeout(r, 100));
+  }
+  dbQueue.push({ batch, i });
+  startDbWorker();
+}
+
+async function flushDbQueue() {
+  while (dbQueue.length > 0 || dbWorkerActive) {
+    await new Promise(r => setTimeout(r, 100));
+  }
+}
+
 async function fetchWithRetry(url, params = {}, retries = 3) {
   for (let i = 0; i < retries; i++) {
     try {
       return await axios.get(url, { params, timeout: 8000 });
     } catch (err) {
       if (i === retries - 1) throw err;
-      await new Promise(r => setTimeout(r, 1000 * (i + 1))); // 지수 백오프
+      await new Promise(r => setTimeout(r, 1000 * (i + 1)));
     }
   }
 }
-
 
 async function getOcid(characterName, serverName) {
   try {
     const resp = await axios.get('https://open.api.nexon.com/baram/v1/id', {
       params: { character_name: characterName, server_name: serverName },
-      headers: { 'x-nxopen-api-key': NEXON_API_KEY }
+      headers: { 'x-nxopen-api-key': NEXON_API_KEY },
+      timeout: 8000
     });
     return resp.data.ocid;
   } catch { return null; }
@@ -64,16 +114,14 @@ async function processCharacter(characterName, serverName, dbServerId, jobCode) 
     if (!ocid) return;
 
     const [basicResp, equipResp] = await Promise.all([
-      axios.get('https://open.api.nexon.com/baram/v1/character/basic', { params: { ocid }, headers: { 'x-nxopen-api-key': NEXON_API_KEY } }),
-      axios.get('https://open.api.nexon.com/baram/v1/character/item-equipment', { params: { ocid }, headers: { 'x-nxopen-api-key': NEXON_API_KEY } })
+      axios.get('https://open.api.nexon.com/baram/v1/character/basic', { params: { ocid }, headers: { 'x-nxopen-api-key': NEXON_API_KEY }, timeout: 8000 }),
+      axios.get('https://open.api.nexon.com/baram/v1/character/item-equipment', { params: { ocid }, headers: { 'x-nxopen-api-key': NEXON_API_KEY }, timeout: 8000 })
     ]);
 
     const PET_NAMES = ["주작", "현무", "백호", "청룡", "황룡", "혼돈", "도올", "궁기", "도철", "고대불의", "고대바람의", "고대땅의", "고대물의", "생명의목걸이"];
-    // 1. 공백 제거 및 안전한 매핑
     const itemsToProcessRaw = (equipResp.data.item_equipment || [])
       .filter(i => i.item_id)
       .map(i => {
-        // 앞뒤 공백을 제거하여 PART_MAP 적중률을 높임
         const slotName = (i.item_equipment_slot_name || '').trim();
         return {
           name: i.item_id.trim(),
@@ -89,27 +137,20 @@ async function processCharacter(characterName, serverName, dbServerId, jobCode) 
     const partCounts = {};
     const itemsToProcess = [];
 
-    // 2. 23번 예외 처리 및 한도 로직 강화
     for (const item of itemsToProcessRaw) {
-      // 23번(미분류/기타) 부위는 개수 제한을 두지 않고 무조건 살립니다.
       if (item.part_id !== 23) {
         const limit = (item.part_id === 4 || item.part_id === 9) ? 2 : 1;
         partCounts[item.part_id] = (partCounts[item.part_id] || 0) + 1;
-
-        // 허용 개수를 초과한 장비(프리셋 등)는 배열에 담지 않고 버림
-        if (partCounts[item.part_id] > limit) {
-          continue;
-        }
+        if (partCounts[item.part_id] > limit) continue;
       }
       itemsToProcess.push(item);
     }
 
     if (itemsToProcess.length === 0) {
-      process.stdout.write(characterName + 's'); // s for skipped
+      process.stdout.write(characterName + 's');
       return;
     }
 
-    // 데드락 방지를 위한 다중 정렬 (1순위: part_id 오름차순, 2순위: name 가나다순)
     itemsToProcess.sort((a, b) => {
       if (a.part_id !== b.part_id) return a.part_id - b.part_id;
       return a.name.localeCompare(b.name, 'ko');
@@ -182,9 +223,9 @@ async function fetchCharacterNamesFromWeb(serverCode, jobCode) {
 }
 
 async function cleanupOldData() {
-  console.log('\n[*] 2일 이상 경과된 오래된 데이터 정리 중...');
-  const twoDaysAgo = new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString();
-  const { count, error } = await supabase.from('users').delete({ count: 'exact' }).lt('updated_at', twoDaysAgo);
+  console.log('\n[*] 1일 이상 경과된 오래된 데이터 정리 중...');
+  const oneDayAgo = new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString();
+  const { count, error } = await supabase.from('users').delete({ count: 'exact' }).lt('updated_at', oneDayAgo);
   if (error) console.error('❌ 데이터 정리 실패:', error.message);
   else console.log(`[*] 정리 완료: ${count || 0}명의 캐릭터 삭제됨`);
 }
@@ -214,24 +255,23 @@ async function runPipeline() {
         const validResults = results.filter(Boolean);
 
         if (validResults.length > 0) {
-          const { error } = await supabase.rpc('upsert_character_data_batch', {
-            p_characters: validResults
-          });
-
-          if (error) {
-            console.error(`\n❌ 배치 RPC 저장 실패 (${i} ~ ${i + BATCH_SIZE}):`, error.message);
-          } else {
-            process.stdout.write(`[${validResults.length}명 저장] `);
-          }
+          await enqueueBatch(validResults, i);
         }
       }
+      await flushDbQueue();
     }
   }
 
+  const MIN_SAVED_THRESHOLD = 100000;
   if (targetJob === null && targetServer === null) {
-    await cleanupOldData();
+    if (totalSavedUsers >= MIN_SAVED_THRESHOLD) {
+      await cleanupOldData();
+    } else {
+      console.warn(`\n⚠️ 정상 수집된 유저 수(${totalSavedUsers}명)가 안전 기준(${MIN_SAVED_THRESHOLD}명) 미만이므로 데이터 보호를 위해 삭제 작업을 건너뜁니다.`);
+    }
   }
   console.log('\n>>> 파이프라인 완료', new Date().getTime() - start, 'ms');
 }
 
 runPipeline().catch(console.error);
+
