@@ -183,7 +183,7 @@ async function fetchCharacterNamesFromWeb(serverCode, jobCode) {
 
 async function cleanupOldData() {
   console.log('\n[*] 2일 이상 경과된 오래된 데이터 정리 중...');
-  const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+  const twoDaysAgo = new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString();
   const { count, error } = await supabase.from('users').delete({ count: 'exact' }).lt('updated_at', twoDaysAgo);
   if (error) console.error('❌ 데이터 정리 실패:', error.message);
   else console.log(`[*] 정리 완료: ${count || 0}명의 캐릭터 삭제됨`);
