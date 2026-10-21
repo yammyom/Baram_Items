@@ -32,7 +32,7 @@ const PART_MAP = {
 
 export default {
   async queue(batch, env) {
-    const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_ANON_KEY);
+    const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
     const NEXON_API_KEY = env.NEXON_API_KEY;
 
     const tasks = batch.messages.map(msg =>
